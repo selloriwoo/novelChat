@@ -1,3 +1,4 @@
+import plotly.graph_objects as go # Plotly import 추가
 from langchain_openai import ChatOpenAI
 from dotenv import load_dotenv
 from langchain.schema import SystemMessage, HumanMessage
@@ -5,10 +6,21 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 import os
 import streamlit as st
 import streamlit.components.v1 as components
-
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_community.chat_message_histories import ChatMessageHistory
+from langchain_core.chat_history import BaseChatMessageHistory
+from langchain_core.runnables.history import RunnableWithMessageHistory
+from langchain_core.messages import HumanMessage
+import pandas as pd
+import numpy as np
+import re
+import matplotlib.pyplot as plt
+from langchain_core.runnables import RunnableParallel
+import os
 
 # .env 파일의 경로를 지정합니다.
-dotenv_path = "./env.txt"
+dotenv_path = "../novelChat/env.txt"
 
 # 지정된 경로의 .env 파일을 로드합니다.
 load_dotenv(dotenv_path=dotenv_path)
@@ -29,27 +41,22 @@ llm_metadata = ChatGoogleGenerativeAI(
 
 )
 
-from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
-from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain_community.chat_message_histories import ChatMessageHistory
-from langchain_core.chat_history import BaseChatMessageHistory
-from langchain_core.runnables.history import RunnableWithMessageHistory
-from langchain_core.messages import HumanMessage
-import pandas as pd
-import numpy as np
-import re
-import matplotlib.pyplot as plt
-from langchain_core.runnables import RunnableParallel
-import os
+# Streamlit에서 소설 파일 업로드
+uploaded_files = st.file_uploader(
+    "소설 텍스트 파일을 업로드하세요 (여러 권 합치려면 여러 파일 업로드)",
+    type=['txt'],
+    accept_multiple_files=True
+)
 
 novelFullText = ""
-f = open('./harryporter/해리포터-마법사의돌-1권.txt', 'r')
-for line in f:
-    novelFullText = novelFullText+line
-
-f = open('./harryporter/해리포터-마법사의돌-2권.txt', 'r')
-for line in f:
-    novelFullText = novelFullText+line
+if uploaded_files:
+    for uploaded_file in uploaded_files:
+        stringio = uploaded_file.read().decode('utf-8')  # 텍스트 파일이 UTF-8 인코딩이라고 가정
+        novelFullText += stringio
+    st.success(f"총 {len(uploaded_files)}개의 파일이 업로드되어 분석에 사용됩니다.")
+else:
+    st.warning("먼저 소설 텍스트(.txt) 파일을 업로드하세요. 예: 해리포터-마법사의돌-1권.txt")
+    st.stop()
 
 model1 = ChatGoogleGenerativeAI(model="gemini-2.0-flash", google_api_key=gemini_api_key, max_output_tokens=7000)
 prompt1 = ChatPromptTemplate.from_messages(
@@ -60,13 +67,15 @@ prompt1 = ChatPromptTemplate.from_messages(
         ),
         # 대화 기록을 변수로 사용, history 가 MessageHistory 의 key 가 됨
         MessagesPlaceholder(variable_name="chat_history"),
-        ("human", "{input}"),  # 사용자 입력을 변수로 사용
+        ("human", "{input}"), # 사용자 입력을 변수로 사용
     ]
 
 )
-runnable1 = prompt1 | model1  # 프롬프트와 모델을 연결하여 runnable 객체 생성
+runnable1 = prompt1 | model1 # 프롬프트와 모델을 연결하여 runnable 객체 생성
 
-store = {}  # 세션 기록을 저장할 딕셔너리
+
+
+store = {} # 세션 기록을 저장할 딕셔너리
 
 def get_session_history(session_id: str) -> BaseChatMessageHistory:
     # 세션 ID에 해당하는 대화 기록이 저장소에 없으면 새로운 ChatMessageHistory를 생성합니다.
@@ -85,10 +94,8 @@ with_message_history1 = RunnableWithMessageHistory(
     input_messages_key="input",
     # 출력 메시지의 키를 "output_message"로 설정합니다. (생략시 Message 객체로 출력)
     # output_messages_key="output_message",
-    history_messages_key="chat_history"  # 기록 메시지의 키
+    history_messages_key="chat_history" # 기록 메시지의 키
 )
-
-
 
 def load_hexaco_questions(filepath="./big5Question.txt"):
     """
@@ -97,18 +104,18 @@ def load_hexaco_questions(filepath="./big5Question.txt"):
 
     Args:
         filepath (str): The path to the text file containing the questions.
-                        문항이 포함된 텍스트 파일의 경로.
+        문항이 포함된 텍스트 파일의 경로.
 
     Returns:
         dict: A dictionary where keys are question numbers (int) and values are question strings.
-              키는 문항 번호(정수), 값은 문항 문자열인 딕셔너리.
+        키는 문항 번호(정수), 값은 문항 문자열인 딕셔너리.
     """
     hexaco_questions = {}
     try:
         with open(filepath, 'r', encoding='utf-8') as f:
             for line in f:
-                line = line.strip()  # Remove leading/trailing whitespace 선행/후행 공백 제거
-                if line:  # Ensure the line is not empty 라인이 비어있지 않은지 확인
+                line = line.strip() # Remove leading/trailing whitespace 선행/후행 공백 제거
+                if line: # Ensure the line is not empty 라인이 비어있지 않은지 확인
                     # 문항 번호와 질문 내용을 분리 (탭 또는 '|' 등으로 구분되어 있다고 가정)
                     # 여기서는 숫자 뒤에 바로 질문이 오는 형태를 파싱하기 위해 정규 표현식을 사용합니다.
                     match = re.match(r'(\d+)\s*(.*)', line)
@@ -118,33 +125,36 @@ def load_hexaco_questions(filepath="./big5Question.txt"):
                             question_text = match.group(2).strip()
                             hexaco_questions[question_number] = question_text[1:]
                         except ValueError:
-                            print(f"경고: 라인을 파싱할 수 없습니다: {line} (유효하지 않은 문항 번호)")
+                            st.warning(f"경고: 라인을 파싱할 수 없습니다: {line} (유효하지 않은 문항 번호)")
                     else:
-                        print(f"경고: 형식이 잘못된 라인을 건너뜁니다: {line}")
+                        st.warning(f"경고: 형식이 잘못된 라인을 건너뜁니다: {line}")
     except FileNotFoundError:
-        print(f"오류: '{filepath}' 파일을 찾을 수 없습니다. 문항 파일을 올바른 위치에 저장했는지 확인해주세요.")
-        print("참고: Korean_self100.doc 파일 내용을 복사하여 hexaco_questions.txt 파일로 저장해야 합니다.")
+        st.error(f"오류: '{filepath}' 파일을 찾을 수 없습니다. 문항 파일을 올바른 위치에 저장했는지 확인해주세요.")
+        st.info("참고: Korean_self100.doc 파일 내용을 복사하여 hexaco_questions.txt 파일로 저장해야 합니다.")
     except Exception as e:
-        print(f"문항 로딩 중 오류가 발생했습니다: {e}")
+        st.error(f"문항 로딩 중 오류가 발생했습니다: {e}")
     return hexaco_questions
 
-# HEXACO 문항 로드
-HEXACO_QUESTIONS = load_hexaco_questions()
+
+# HEXACO 문항 로드 (Streamlit 앱 실행 시 한번만 로드되도록 캐싱)
+@st.cache_data
+def cached_load_hexaco_questions(filepath):
+    return load_hexaco_questions(filepath)
+
+
+HEXACO_QUESTIONS = cached_load_hexaco_questions("../novelChat/big5Question.txt")
 
 # 로드된 문항 확인
 if HEXACO_QUESTIONS:
-    print(f"HEXACO 문항 {len(HEXACO_QUESTIONS)}개 로드 완료.")
-    print(f"문항 1: {HEXACO_QUESTIONS.get(1)}")
-    print(f"문항 100: {HEXACO_QUESTIONS.get(100)}")
+    st.success(f"HEXACO 문항 {len(HEXACO_QUESTIONS)}개 로드 완료.")
 else:
-    print("문항 로드에 실패하여 설문 진행이 어려울 수 있습니다.")
+    st.warning("문항 로드에 실패하여 설문 진행이 어려울 수 있습니다.")
 
-print(HEXACO_QUESTIONS)
 # --- 1. HEXACO 주요 요인 및 하위 척도별 문항 번호 정의 (공식 채점 키 기반) ---
 # ScoringKeys_100.pdf 파일에서 추출한 정확한 채점 키를 사용합니다.
 # 'items' 리스트에는 해당 하위 척도에 속하는 모든 문항 번호가 포함됩니다.
 # 'reverse_items' 리스트에는 해당 하위 척도의 문항 중 역채점해야 할 문항 번호가 포함됩니다.
-# Altruism은 주요 6가지 요인 점수 계산 시에는 포함되지 않습니다. [cite: 65]
+# Altruism은 주요 6가지 요인 점수 계산 시에는 포함되지 않습니다.
 
 HEXACO_SCORING_KEY_FACETS = {
     'Honesty-Humility': {
@@ -195,11 +205,23 @@ HEXACO_FACTORS_ORDER = [
     'Openness to Experience'
 ]
 
-# Altruism 척도 (주요 요인 점수 계산 시에는 포함되지 않음) [cite: 65]
+# Altruism 척도 (주요 요인 점수 계산 시에는 포함되지 않음)
 ALTRUISM_KEY = {
     'items': [97, 98, 99, 100],
-    'reverse_items': [99, 100] # 97, 98, 99R, 100R [cite: 58]
+    'reverse_items': [99, 100] # 97, 98, 99R, 100R
 }
+
+def get_characters_list():
+        responseChar = with_message_history1.invoke(  # 이 부분은 실제 대화형 AI 시스템과 연동될 때 활성화
+            {"input": HumanMessage(content=novelFullText + """... 여기서 등장인물의 행동과 성격이 파악이 원활히 가능한 등장인물들을 나열 해 줘. 절대적으로 다음 답변형식 대로만 답 해 줘. 답변 형식: 등장인물1, 등장인물2, 등장인물3""")},
+            config={"configurable": {"session_id": "aazz1"}})
+        response_str = responseChar.content  # 예: "해리 포터, 론 위즐리, 헤르미온느 그레인저, ..."
+
+        # 문자열을 리스트로 변환 (쉼표, 공백 기준으로 분리)
+        character_list = [name.strip() for name in response_str.split(",") if name.strip()]
+
+        return character_list
+
 # --- 2. 사용자 응답 입력 함수 ---
 def get_user_responses(questions_data):
     """
@@ -216,9 +238,9 @@ def get_user_responses(questions_data):
 
     stored=get_session_history("abcd1234")
     response1= with_message_history1.invoke( # 이 부분은 실제 대화형 AI 시스템과 연동될 때 활성화
-    {"input": HumanMessage(content=novelFullText+"""... 여기까지 소설 내용이야. 너는 소설 내용을 보고 등장인물인 '론 위즐리'라고 생각하고 각 질문에 대답할거야.  소설 내용 근거로 '론 위즐리' 입장에서 다음 각 번호 질문에 다음 기준으로 점수 답해 줘. 1='전혀 그렇지 않다.' 2='그렇지 않은편이다.' 3='중간정도' 4='그런편이다' 5='매우 그렇다'. 이 기준으로도 모르겠으면 1에서 5까지 자연수로 5에 가까울 수록 더욱더 해당 질문에 동의 하는편으로 기준 생각 해 줘.
-    답변형식은 다른 말 하지말고 1. 1, 2. 2, 3. 5, 4. 4, 5. 3 이런식으로 '번호.점수'로 나열해 줘."""+formatted_questions)},
-    config={"configurable": {"session_id": "abcd1234"}},
+        {"input": HumanMessage(content=novelFullText+"""... 여기까지 소설 내용이야. 너는 소설 내용을 보고 등장인물인 '론 위즐리'라고 생각하고 각 질문에 대답할거야. 소설 내용 근거로 '론 위즐리' 입장에서 다음 각 번호 질문에 다음 기준으로 점수 답해 줘. 1='전혀 그렇지 않다.' 2='그렇지 않은편이다.' 3='중간정도' 4='그런편이다' 5='매우 그렇다'. 이 기준으로도 모르겠으면 1에서 5까지 자연수로 5에 가까울 수록 더욱더 해당 질문에 동의 하는편으로 기준 생각 해 줘.
+        답변형식은 다른 말 하지말고 1. 1, 2. 2, 3. 5, 4. 4, 5. 3 이런식으로 '번호.점수'로 나열해 줘."""+formatted_questions)},
+        config={"configurable": {"session_id": "abcd1234"}},
     )
 
 
@@ -244,13 +266,14 @@ def get_user_responses(questions_data):
 
     return responses
 
+
 # --- 3. HEXACO 점수 계산 함수 (주요 요인 및 하위 척도 모두 계산) ---
 def calculate_hexaco_scores(responses, scoring_key_facets, factors_order, altruism_key):
     """
-    HEXACO-PI-R 주요 요인 및 하위 척도 점수를 계산하는 함수. [cite: 62]
+    HEXACO-PI-R 주요 요인 및 하위 척도 점수를 계산하는 함수.
     Args:
         responses (dict): 문항 번호(int)를 키로 하고 응답 점수(int)를 값으로 하는 딕셔너리.
-        scoring_key_facets (dict): 각 HEXACO 주요 요인 및 하위 척도별 문항 및 역채점 정보 딕셔너리. [cite: 59]
+        scoring_key_facets (dict): 각 HEXACO 주요 요인 및 하위 척도별 문항 및 역채점 정보 딕셔너리.
         factors_order (list): HEXACO 주요 요인의 순서 리스트.
         altruism_key (dict): 알트루이즘 척도의 문항 및 역채점 정보 딕셔너리.
 
@@ -262,12 +285,12 @@ def calculate_hexaco_scores(responses, scoring_key_facets, factors_order, altrui
         main_factor: {facet: [] for facet in facet_details.keys()}
         for main_factor, facet_details in scoring_key_facets.items()
     }
-    # 주요 요인 점수를 계산하기 위한 모든 원시 점수 (하위 척도 점수를 합산하지 않음) [cite: 62]
+    # 주요 요인 점수를 계산하기 위한 모든 원시 점수 (하위 척도 점수를 합산하지 않음)
     main_factor_scores_raw = {factor: [] for factor in factors_order}
     # 알트루이즘 점수
     altruism_raw_scores = []
 
-    # 하위 척도별 점수 처리 [cite: 59]
+    # 하위 척도별 점수 처리
     for main_factor, facet_details in scoring_key_facets.items():
         for facet_name, details in facet_details.items():
             items_in_facet = details['items']
@@ -275,12 +298,12 @@ def calculate_hexaco_scores(responses, scoring_key_facets, factors_order, altrui
 
             for q_num in items_in_facet:
                 if q_num not in responses:
-                    print(f"경고: 문항 {q_num}에 대한 응답이 누락되었습니다. {main_factor} - {facet_name} 점수 계산에서 제외됩니다.")
+                    st.warning(f"경고: 문항 {q_num}에 대한 응답이 누락되었습니다. {main_factor} - {facet_name} 점수 계산에서 제외됩니다.")
                     continue
 
                 response_score = responses[q_num]
 
-                # 역채점 문항 처리 (1-5점 척도 기준: 6 - 원래 점수) [cite: 59]
+                # 역채점 문항 처리 (1-5점 척도 기준: 6 - 원래 점수)
                 if q_num in reverse_items_in_facet:
                     processed_score = 6 - response_score
                 else:
@@ -289,10 +312,10 @@ def calculate_hexaco_scores(responses, scoring_key_facets, factors_order, altrui
                 facet_scores_raw[main_factor][facet_name].append(processed_score)
                 main_factor_scores_raw[main_factor].append(processed_score) # 주요 요인 계산을 위해 원시 점수 추가
 
-    # 알트루이즘 척도 점수 처리 [cite: 65]
+    # 알트루이즘 척도 점수 처리
     for q_num in altruism_key['items']:
         if q_num not in responses:
-            print(f"경고: 문항 {q_num}에 대한 응답이 누락되었습니다. Altruism 점수 계산에서 제외됩니다.")
+            st.warning(f"경고: 문항 {q_num}에 대한 응답이 누락되었습니다. Altruism 점수 계산에서 제외됩니다.")
             continue
         response_score = responses[q_num]
         if q_num in altruism_key['reverse_items']:
@@ -301,7 +324,7 @@ def calculate_hexaco_scores(responses, scoring_key_facets, factors_order, altrui
             processed_score = response_score
         altruism_raw_scores.append(processed_score)
 
-    # 최종 하위 척도 평균 점수 계산 [cite: 59]
+    # 최종 하위 척도 평균 점수 계산
     final_facet_scores = {}
     for main_factor, facet_details in facet_scores_raw.items():
         final_facet_scores[main_factor] = {}
@@ -311,7 +334,7 @@ def calculate_hexaco_scores(responses, scoring_key_facets, factors_order, altrui
             else:
                 final_facet_scores[main_factor][facet_name] = np.nan
 
-    # 최종 주요 요인 평균 점수 계산 [cite: 62]
+    # 최종 주요 요인 평균 점수 계산
     final_main_factor_scores = {}
     for factor in factors_order:
         scores = main_factor_scores_raw[factor]
@@ -323,9 +346,10 @@ def calculate_hexaco_scores(responses, scoring_key_facets, factors_order, altrui
     # 최종 알트루이즘 평균 점수 계산
     final_altruism_score = np.mean(altruism_raw_scores) if altruism_raw_scores else np.nan
 
-    return final_main_factor_scores, final_facet_scores, final_altruism_score # altruism_score 대신 final_altruism_score 반환
+    return final_main_factor_scores, final_facet_scores, final_altruism_score
 
-# --- 4. 표준 집단 통계 데이터  ---
+
+# --- 4. 표준 집단 통계 데이터 ---
 # "Self-Report Form"의 'Total' 열에 있는 M (평균) 및 SD (표준편차) 값입니다.
 # Descriptive Statistics and Internal-Consistency Reliabilities of the HEXACO-100 Scales in a College Student Sample의 데이터
 # Altruism은 interstitial facet scale입니다.
@@ -333,59 +357,58 @@ def calculate_hexaco_scores(responses, scoring_key_facets, factors_order, altrui
 STANDARD_MEANS_SELF_REPORT = {
     'Honesty-Humility': 3.19, 'Emotionality': 3.43, 'Extraversion': 3.50,
     'Agreeableness': 2.94, 'Conscientiousness': 3.44, 'Openness to Experience': 3.41
-} #
+}
 
 STANDARD_SDS_SELF_REPORT = {
     'Honesty-Humility': 0.62, 'Emotionality': 0.62, 'Extraversion': 0.57,
     'Agreeableness': 0.58, 'Conscientiousness': 0.56, 'Openness to Experience': 0.60
-} #
+}
 
 STANDARD_MEANS_SELF_REPORT_FACETS = {
     'Honesty-Humility': {
         'Sincerity': 3.20, 'Fairness': 3.34, 'Greed-Avoidance': 2.72, 'Modesty': 3.49
-    }, #
+    },
     'Emotionality': {
         'Fearfulness': 3.06, 'Anxiety': 3.69, 'Dependence': 3.38, 'Sentimentality': 3.58
-    }, #
+    },
     'Extraversion': {
         'Social Self-Esteem': 3.85, 'Social Boldness': 3.03, 'Sociability': 3.59, 'Liveliness': 3.52
-    }, #
+    },
     'Agreeableness': {
         'Forgiveness': 2.75, 'Gentleness': 3.17, 'Flexibility': 2.74, 'Patience': 3.11
-    }, #
+    },
     'Conscientiousness': {
         'Organization': 3.26, 'Diligence': 3.79, 'Perfectionism': 3.50, 'Prudence': 3.18
-    }, #
+    },
     'Openness to Experience': {
         'Aesthetic Appreciation': 3.34, 'Inquisitiveness': 3.19, 'Creativity': 3.63, 'Unconventionality': 3.46
-    }, #
-    'Altruism': 3.90 # Altruism은 interstitial facet scale입니다.
+    },
+    'Altruism': 3.90
 }
 
 STANDARD_SDS_SELF_REPORT_FACETS = {
     'Honesty-Humility': {
         'Sincerity': 0.78, 'Fairness': 0.98, 'Greed-Avoidance': 0.98, 'Modesty': 0.78
-    }, #
+    },
     'Emotionality': {
         'Fearfulness': 0.89, 'Anxiety': 0.81, 'Dependence': 0.87, 'Sentimentality': 0.80
-    }, #
+    },
     'Extraversion': {
         'Social Self-Esteem': 0.68, 'Social Boldness': 0.87, 'Sociability': 0.75, 'Liveliness': 0.77
-    }, #
+    },
     'Agreeableness': {
         'Forgiveness': 0.83, 'Gentleness': 0.73, 'Flexibility': 0.72, 'Patience': 0.86
-    }, #
+    },
     'Conscientiousness': {
         'Organization': 0.91, 'Diligence': 0.68, 'Perfectionism': 0.78, 'Prudence': 0.75
-    }, #
+    },
     'Openness to Experience': {
         'Aesthetic Appreciation': 0.88, 'Inquisitiveness': 0.88, 'Creativity': 0.85, 'Unconventionality': 0.64
-    }, #
+    },
     'Altruism': 0.67
-} #
+}
 
 # --- 점수 범위별 설명 매핑 데이터 ---
-# 캡디 big 척도 해석.docx 파일 내용을 기반으로 작성
 SCORE_INTERPRETATIONS = {
     'Honesty-Humility': {
         (4.21, 5.00): "매우 정직하고 겸손하며, 권력·물질·지위에 대한 욕망이 거의 없음. 도덕적 신념이 확고하고 타인을 착취하거나 속이는 일을 강하게 거부함.",
@@ -628,129 +651,268 @@ def interpret_score(score, trait_name):
             return description
     return "점수 범위 외"
 
-
-# --- 메인 실행 부분 ---
-if __name__ == '__main__':
-    # 사용자 응답 받기 (문항 내용 함께 출력)
-    user_responses = get_user_responses(HEXACO_QUESTIONS)
-
-    # HEXACO 점수 계산 (주요 요인, 하위 척도, 알트루이즘)
-    main_factor_scores, facet_scores, altruism_score = calculate_hexaco_scores(
-        user_responses, HEXACO_SCORING_KEY_FACETS, HEXACO_FACTORS_ORDER, ALTRUISM_KEY
+# --- 등장인물별 get_user_responses 함수 ---
+def get_user_responses_for_character(character_name, questions_data):
+    """
+    등장인물 이름에 따라 LLM에 답변을 요청하는 함수.
+    """
+    formatted_questions = ""
+    for q_num, q_text in questions_data.items():
+        formatted_questions += f"{q_num}. {q_text}\n"
+    responses = {}
+    session_id = f"hexaco_{character_name}"
+    stored = get_session_history(session_id)
+    response1 = with_message_history1.invoke(
+        {"input": HumanMessage(content=novelFullText +
+            f"... 여기까지 소설 내용이야. 너는 소설 내용을 보고 등장인물인 '{character_name}'라고 생각하고 각 질문에 대답할거야. 소설 내용 근거로 '{character_name}' 입장에서 다음 각 번호 질문에 다음 기준으로 점수 답해 줘. 1='전혀 그렇지 않다.' 2='그렇지 않은편이다.' 3='중간정도' 4='그런편이다' 5='매우 그렇다'. 이 기준으로도 모르겠으면 1에서 5까지 자연수로 5에 가까울 수록 더욱더 해당 질문에 동의 하는편으로 기준 생각 해 줘.\n답변형식은 다른 말 하지말고 1. 1, 2. 2, 3. 5, 4. 4, 5. 3 이런식으로 '번호.점수'로 나열해 줘.\n" +
+            formatted_questions)},
+        config={"configurable": {"session_id": session_id}},
     )
-
-    print("\n" + "="*50)
-    print("           HEXACO-PI-R 성격 점수 결과           ")
-    print("="*50)
-    final_hexako = ""
-    # 결과 출력 및 표준 집단과의 비교
-    print("\n--- 개인의 HEXACO 점수 (평균) 및 해석 ---")
-    for factor in HEXACO_FACTORS_ORDER:
-        main_score = main_factor_scores.get(factor)
-        if pd.isna(main_score):
-            print(f"** {factor}: 응답 부족으로 계산 불가 **")
+    response_content_string = response1.content
+    individual_responses = response_content_string.strip().split('\n')
+    for item in individual_responses:
+        parts = item.split(". ")
+        if len(parts) == 2:
+            try:
+                q_num = int(parts[0])
+                score = int(parts[1])
+                responses[q_num] = score
+            except ValueError:
+                print(f"경고: 유효하지 않은 형식입니다 (숫자 변환 실패): {item}")
         else:
-            main_interpretation = interpret_score(main_score, factor)
-            print(f"** {factor}: {main_score:.2f} (최소 1.00, 최대 5.00) - {main_interpretation}")
+            print(f"경고: 예상치 못한 응답 형식입니다 (스킵됨): {item}")
+    return responses
 
-            final_hexako += f"** {factor}: {main_score:.2f} (최소 1.00, 최대 5.00) - {main_interpretation} "
-            # 하위 척도 점수 출력
+def create_radar_chart(scores, categories, title):
+    """
+    Plotly를 사용하여 레이더 차트를 생성합니다.
+    - 범주(카테고리) 라벨은 흰색
+    - 반지름(숫자 눈금) 라벨은 빨간색
+    """
+    scores = scores + scores[:1]
+    categories = categories + categories[:1]
+    fig = go.Figure(
+        data=[
+            go.Scatterpolar(
+                r=scores,
+                theta=categories,
+                fill='toself',
+                name='등장인물 점수'
+            )
+        ],
+        layout=go.Layout(
+            title=go.layout.Title(text=title),
+            polar=dict(
+                radialaxis=dict(
+                    visible=True,
+                    range=[1, 5],
+                    tickfont=dict(color='red'),  # 반지름(숫자) 빨간색
+                    tickvals=[1, 1.5, 2, 2.5, 3, 3.5, 4, 4.5, 5],
+                ),
+                angularaxis=dict(
+                    tickfont=dict(color='white'),  # 카테고리(글자) 흰색
+                )
+            ),
+            showlegend=True
+        )
+    )
+    return fig
+
+
+
+# Streamlit 앱의 메인 함수
+def main():
+    st.title("HEXACO-PI-R 성격 설문 분석 및 소설 등장인물 챗봇")
+
+    # 등장인물 리스트 버튼
+    if 'selected_character' not in st.session_state:
+        with st.spinner("등장인물 분석 중..."):
+            character_list = get_characters_list()
+            st.session_state['character_list'] = character_list
+        st.header("1단계: 등장인물 선택")
+        st.info("아래 등장인물 중 분석 및 대화를 원하는 인물을 선택하세요.")
+        cols = st.columns(3)
+        for idx, character in enumerate(st.session_state['character_list']):
+            if cols[idx % 3].button(character):
+                st.session_state['selected_character'] = character
+                st.session_state.responses_submitted = False
+                st.session_state.hexaco_analysis_done = False
+                st.session_state.final_hexako_result = ""
+                st.session_state.chat_history = []
+                st.rerun()
+        if 'selected_character' not in st.session_state:
+            st.stop()
+
+    character_name = st.session_state['selected_character']
+    st.success(f"선택된 등장인물: **{character_name}**")
+
+    # 분석
+    if not st.session_state.responses_submitted:
+        st.header(f"{character_name}의 HEXACO 성격 분석")
+        st.write(f"아래 **'결과 보기'** 버튼을 클릭하면 **{character_name}**의 HEXACO 성격 설문 응답을 기반으로 분석을 진행합니다.")
+
+        user_responses = get_user_responses_for_character(character_name, HEXACO_QUESTIONS)
+        if st.button("결과 보기"):
+            with st.spinner(f"{character_name}의 성격을 분석 중입니다..."):
+                main_factor_scores, facet_scores, altruism_score = calculate_hexaco_scores(
+                    user_responses, HEXACO_SCORING_KEY_FACETS, HEXACO_FACTORS_ORDER, ALTRUISM_KEY
+                )
+                st.session_state.main_factor_scores = main_factor_scores
+                st.session_state.facet_scores = facet_scores
+                st.session_state.altruism_score = altruism_score
+                st.session_state.responses_submitted = True
+                st.session_state.hexaco_analysis_done = True
+
+                # HEXACO 결과 저장
+                final_hexako_parts = [f"--- {character_name}의 HEXACO 성격 분석 결과 ---"]
+                for factor in HEXACO_FACTORS_ORDER:
+                    main_score = main_factor_scores.get(factor)
+                    if pd.isna(main_score):
+                        final_hexako_parts.append(f"** {factor}: 응답 부족으로 계산 불가 **")
+                    else:
+                        main_interpretation = interpret_score(main_score, factor)
+                        final_hexako_parts.append(f"** {factor}: {main_score:.2f} - {main_interpretation}")
+                        for facet_name, facet_score in facet_scores.get(factor, {}).items():
+                            if pd.isna(facet_score):
+                                final_hexako_parts.append(f" - {facet_name}: 응답 부족으로 계산 불가")
+                            else:
+                                facet_interpretation = interpret_score(facet_score, facet_name)
+                                final_hexako_parts.append(
+                                    f" - {facet_name}: {facet_score:.2f} - {facet_interpretation}")
+                if not pd.isna(altruism_score):
+                    altruism_interpretation = interpret_score(altruism_score, 'Altruism')
+                    final_hexako_parts.append(
+                        f"** Altruism (interstitial facet scale): {altruism_score:.2f} - {altruism_interpretation}")
+                final_hexako_parts.append("--------------------------------------")
+                st.session_state.final_hexako_result = "\n".join(final_hexako_parts)
+            st.rerun()
+
+    # 결과 및 챗봇
+    if st.session_state.responses_submitted:
+        st.write("---")
+        st.subheader(f"HEXACO 성격 점수 결과 - {character_name}")
+        main_factor_scores = st.session_state.main_factor_scores
+        facet_scores = st.session_state.facet_scores
+        altruism_score = st.session_state.altruism_score
+
+        # 레이더 차트 그리기
+        st.header(f"{character_name}의 HEXACO 6가지 주요 요인 레이더 차트")
+        radar_categories = [factor for factor in HEXACO_FACTORS_ORDER if not pd.isna(main_factor_scores.get(factor))]
+        radar_scores = [main_factor_scores[factor] for factor in radar_categories]
+        if radar_scores:
+            fig = create_radar_chart(radar_scores, radar_categories, f"{character_name}의 HEXACO 주요 요인")
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.warning("레이더 차트를 그릴 충분한 데이터가 없습니다.")
+
+        st.subheader(f"{character_name}의 HEXACO 점수 (평균) 및 해석")
+        for factor in HEXACO_FACTORS_ORDER:
+            main_score = main_factor_scores.get(factor)
+            if pd.isna(main_score):
+                st.write(f"** {factor}: 응답 부족으로 계산 불가 **")
+            else:
+                main_interpretation = interpret_score(main_score, factor)
+                st.write(f"** {factor}: {main_score:.2f} (최소 1.00, 최대 5.00) - {main_interpretation}")
             for facet_name, facet_score in facet_scores.get(factor, {}).items():
                 if pd.isna(facet_score):
-                    print(f"  - {facet_name}: 응답 부족으로 계산 불가")
+                    st.write(f" - {facet_name}: 응답 부족으로 계산 불가")
                 else:
                     facet_interpretation = interpret_score(facet_score, facet_name)
-                    print(f"  - {facet_name}: {facet_score:.2f} - {facet_interpretation}")
-                    final_hexako += f"  - {facet_name}: {facet_score:.2f} - {facet_interpretation}"
+                    st.write(f" - {facet_name}: {facet_score:.2f} - {facet_interpretation}")
 
-    # 알트루이즘 점수 출력
-    if not pd.isna(altruism_score):
-        altruism_interpretation = interpret_score(altruism_score, 'Altruism')
-        print(f"\n** Altruism (interstitial facet scale): {altruism_score:.2f} (최소 1.00, 최대 5.00) - {altruism_interpretation}")
+        if not pd.isna(altruism_score):
+            altruism_interpretation = interpret_score(altruism_score, 'Altruism')
+            st.write(
+                f"\n** Altruism (interstitial facet scale): {altruism_score:.2f} (최소 1.00, 최대 5.00) - {altruism_interpretation}")
 
+        st.subheader("표준 집단 (대학생 표본)과의 비교")
+        st.write("(자기보고 기준, Z-점수는 표준 집단 대비 상대적 위치를 나타냄)")
 
-    print("\n" + "="*50)
-    print("      표준 집단 (대학생 표본)과의 비교      ")
-    print("="*50)
-    print("(자기보고 기준, Z-점수는 표준 집단 대비 상대적 위치를 나타냄)")
-
-    # 주요 요인 Z-점수 비교
-    print("\n--- 주요 HEXACO 요인 Z-점수 ---")
-    for factor in HEXACO_FACTORS_ORDER:
-        user_score = main_factor_scores.get(factor)
-        if pd.isna(user_score) or factor not in STANDARD_MEANS_SELF_REPORT:
-            continue
-
-        mean_std = STANDARD_MEANS_SELF_REPORT[factor]
-        sd_std = STANDARD_SDS_SELF_REPORT[factor]
-
-        z_score = (user_score - mean_std) / sd_std
-        print(f"{factor}: 내 점수 {user_score:.2f} (표준 평균 {mean_std:.2f}, 표준편차 {sd_std:.2f}, Z-점수 {z_score:.2f})")
-
-    # 하위 척도 Z-점수 비교
-    print("\n--- HEXACO 하위 척도 Z-점수 ---")
-    for factor in HEXACO_FACTORS_ORDER:
-        print(f"\n** {factor}의 하위 척도:")
-        for facet_name, user_facet_score in facet_scores.get(factor, {}).items():
-            if pd.isna(user_facet_score) or facet_name not in STANDARD_MEANS_SELF_REPORT_FACETS.get(factor, {}):
-                print(f"  - {facet_name}: 데이터 부족 또는 표준 데이터 없음")
+        # 주요 요인 Z-점수 비교
+        st.markdown("### 주요 HEXACO 요인 Z-점수")
+        for factor in HEXACO_FACTORS_ORDER:
+            user_score = main_factor_scores.get(factor)
+            if pd.isna(user_score) or factor not in STANDARD_MEANS_SELF_REPORT:
                 continue
+            mean_std = STANDARD_MEANS_SELF_REPORT[factor]
+            sd_std = STANDARD_SDS_SELF_REPORT[factor]
+            z_score = (user_score - mean_std) / sd_std
+            st.write(f"{factor}: 내 점수 {user_score:.2f} (표준 평균 {mean_std:.2f}, 표준편차 {sd_std:.2f}, Z-점수 {z_score:.2f})")
 
-            mean_std = STANDARD_MEANS_SELF_REPORT_FACETS[factor][facet_name]
-            sd_std = STANDARD_SDS_SELF_REPORT_FACETS[factor][facet_name]
+        # 하위 척도 Z-점수 비교
+        st.markdown("### HEXACO 하위 척도 Z-점수")
+        for factor in HEXACO_FACTORS_ORDER:
+            st.markdown(f"** {factor}의 하위 척도:")
+            for facet_name, user_facet_score in facet_scores.get(factor, {}).items():
+                if pd.isna(user_facet_score) or facet_name not in STANDARD_MEANS_SELF_REPORT_FACETS.get(factor, {}):
+                    st.write(f" - {facet_name}: 데이터 부족 또는 표준 데이터 없음")
+                    continue
+                mean_std = STANDARD_MEANS_SELF_REPORT_FACETS[factor][facet_name]
+                sd_std = STANDARD_SDS_SELF_REPORT_FACETS[factor][facet_name]
+                z_score = (user_facet_score - mean_std) / sd_std
+                st.write(
+                    f" - {facet_name}: 내 점수 {user_facet_score:.2f} (표준 평균 {mean_std:.2f}, 표준편차 {sd_std:.2f}, Z-점수 {z_score:.2f})")
 
-            z_score = (user_facet_score - mean_std) / sd_std
-            print(f"  - {facet_name}: 내 점수 {user_facet_score:.2f} (표준 평균 {mean_std:.2f}, 표준편차 {sd_std:.2f}, Z-점수 {z_score:.2f})")
+        if not pd.isna(altruism_score) and 'Altruism' in STANDARD_MEANS_SELF_REPORT_FACETS:
+            mean_std = STANDARD_MEANS_SELF_REPORT_FACETS['Altruism']
+            sd_std = STANDARD_SDS_SELF_REPORT_FACETS['Altruism']
+            z_score = (altruism_score - mean_std) / sd_std
+            st.write(
+                f"\n** Altruism: 내 점수 {altruism_score:.2f} (표준 평균 {mean_std:.2f}, 표준편차 {sd_std:.2f}, Z-점수 {z_score:.2f})")
 
-    # 알트루이즘 Z-점수 비교
-    if not pd.isna(altruism_score) and 'Altruism' in STANDARD_MEANS_SELF_REPORT_FACETS:
-        mean_std = STANDARD_MEANS_SELF_REPORT_FACETS['Altruism']
-        sd_std = STANDARD_SDS_SELF_REPORT_FACETS['Altruism']
-        z_score = (altruism_score - mean_std) / sd_std
-        print(f"\n** Altruism: 내 점수 {altruism_score:.2f} (표준 평균 {mean_std:.2f}, 표준편차 {sd_std:.2f}, Z-점수 {z_score:.2f})")
+        st.markdown("### Z-점수 해석 가이드")
+        st.info("""
+    * **Z-점수 0 근처**: 표준 집단(대학생)의 평균과 유사
+    * **Z-점수 양수 (+)**: 표준 집단 평균보다 해당 특성이 높음
+    * **Z-점수 음수 (-)**: 표준 집단 평균보다 해당 특성이 낮음
+    * (예: Z-점수 +1.0은 약 상위 16%, -1.0은 약 하위 16% 수준)
+    """)
+        st.write("이 결과는 개인의 성격 특성이 특정 집단(이 경우 대학생 표본)과 비교했을 때")
+        st.write("어느 정도 수준인지 상대적으로 이해하는 데 도움이 됩니다.")
+        st.warning("참고: 하위 척도는 내적 일관성 신뢰도가 높지 않을 수 있으며, 주요 요인 점수가 더 신뢰할 수 있습니다.")
+
+        st.write("---")
+        st.header(f"2단계: {character_name}와 대화하기")
+        st.write(f"이제 {character_name}의 성격 분석 결과를 토대로 {character_name}와 대화할 수 있습니다.")
+
+        # 채팅 메시지 표시
+        for message in st.session_state.chat_history:
+            with st.chat_message(message["role"]):
+                st.markdown(message["content"])
+
+        # 채팅 입력 처리
+        if prompt := st.chat_input(f"{character_name}에게 말을 걸어보세요!"):
+            st.session_state.chat_history.append({"role": "user", "content": prompt})
+            with st.chat_message("user"):
+                st.markdown(prompt)
+            prompt2 = ChatPromptTemplate.from_messages(
+                [
+                    (
+                        "system",
+                        f"""너는 사용자가 올린 소설 속 이야기를 기반으로 대화하는 등장인물이다. 너는 소설 속 '{character_name}'처럼 말하고 행동해야 해. 네 성격은 다음 Hexaco 결과에 기반을 두고 있어:
+                            Hexaco 결과: {st.session_state.final_hexako_result}""",
+                    ),
+                    MessagesPlaceholder(variable_name="chat_history"),
+                    ("human", "{input}"),
+                ]
+            )
+            runnable2 = prompt2 | model1
+            with_message_history2 = RunnableWithMessageHistory(
+                runnable2,
+                get_session_history,
+                input_messages_key="input",
+                history_messages_key="chat_history"
+            )
+            with st.chat_message("assistant"):
+                with st.spinner(f"{character_name}가 생각 중..."):
+                    response_content = with_message_history2.invoke(
+                        {"input": HumanMessage(content=prompt)},
+                        config={"configurable": {"session_id": f"abcd_{character_name}_chat"}},
+                    )
+                    full_response = response_content.content
+                    st.markdown(full_response)
+                    st.session_state.chat_history.append({"role": "assistant", "content": full_response})
 
 
-    print("\n--- Z-점수 해석 가이드 ---")
-    print("  * Z-점수 0 근처: 표준 집단(대학생)의 평균과 유사")
-    print("  * Z-점수 양수 (+): 표준 집단 평균보다 해당 특성이 높음")
-    print("  * Z-점수 음수 (-): 표준 집단 평균보다 해당 특성이 낮음")
-    print("  * (예: Z-점수 +1.0은 약 상위 16%, -1.0은 약 하위 16% 수준)")
-    print("\n이 결과는 개인의 성격 특성이 특정 집단(이 경우 대학생 표본)과 비교했을 때")
-    print("어느 정도 수준인지 상대적으로 이해하는 데 도움이 됩니다.")
-    print("\n참고: 하위 척도는 내적 일관성 신뢰도가 높지 않을 수 있으며, 주요 요인 점수가 더 신뢰할 수 있습니다. [cite: 60]")
-
-    print(final_hexako)
-
-    # 실험을 위해 대화 기록 초기화
-    store = {}
-
-    # hexaco 결과를 넣어 대화
-    print("헥사코 미 반영시")
-    # hexako 미 반영시
-    response3 = with_message_history1.invoke(  # 이 부분은 실제 대화형 AI 시스템과 연동될 때 활성화
-        {"input": HumanMessage(
-            content=novelFullText + """... 여기까지 소설 내용이야. 너는 소설 내용을 보고 등장인물인 '론 위즐리'라고 생각하고 이 소설을 읽은 독자(reader)인 3자인 나와 대화할거야."""
-            )},
-        config={"configurable": {"session_id": "abcd123456"}},
-    )
-
-    response3 = with_message_history1.invoke(  # 이 부분은 실제 대화형 AI 시스템과 연동될 때 활성화
-        {"input": HumanMessage(content="안녕 헤리 포터가 볼드모트에 맞서는거 보고 어떻게 생각해?")},
-        config={"configurable": {"session_id": "abcd123456"}},
-    )
-    print(response3.content)
-
-    print("헥사코 반영시")
-    response4 = with_message_history1.invoke(  # 이 부분은 실제 대화형 AI 시스템과 연동될 때 활성화
-        {"input": HumanMessage(
-            content="""novelFullText+.. 여기까지 소설 내용이야. 너는 소설 내용을 보고 등장인물인 '론 위즐리'라고 생각하고 다음에'존 위즐리'의 HEXACO 성격 분석 결과 보여줄텐데 너의 성격에 더욱 세부적으로 등장인물을 이해해서 이 소설을 읽은 독자(reader)인 나와 대화해 줘.""" +
-                    final_hexako
-            )},
-        config={"configurable": {"session_id": "abcd1234567"}},
-    )
-
-    response4 = with_message_history1.invoke(  # 이 부분은 실제 대화형 AI 시스템과 연동될 때 활성화
-            {"input": HumanMessage(content="안녕 헤리 포터가 볼드모트에 맞서는거 보고 어떻게 생각해?")},
-        config={"configurable": {"session_id": "abcd1234567"}},
-    )
-    print(response4.content)
+if __name__ == '__main__':
+    main()
