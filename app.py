@@ -1,11 +1,6 @@
 import plotly.graph_objects as go # Plotly import 추가
-from langchain_openai import ChatOpenAI
 from dotenv import load_dotenv
-from langchain.schema import SystemMessage, HumanMessage
-from langchain_google_genai import ChatGoogleGenerativeAI
-import os
 import streamlit as st
-import streamlit.components.v1 as components
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_community.chat_message_histories import ChatMessageHistory
@@ -15,9 +10,14 @@ from langchain_core.messages import HumanMessage
 import pandas as pd
 import numpy as np
 import re
-import matplotlib.pyplot as plt
-from langchain_core.runnables import RunnableParallel
 import os
+import chardet
+import toml
+import json
+from collections import defaultdict
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_openai import ChatOpenAI
+from langchain.schema import SystemMessage, HumanMessage
 
 # .env 파일의 경로를 지정합니다.
 dotenv_path = "../novelChat/env.txt"
@@ -29,17 +29,12 @@ load_dotenv(dotenv_path=dotenv_path)
 openai_api_key = os.getenv("OPENAI_API_KEY")
 gemini_api_key = os.getenv("GOOGLE_API_KEY")
 #모델 연결
-# llm_metadata = ChatOpenAI(
-#     model="gpt-3.5-turbo",
-#     temperature=0.2,
-#     openai_api_key=openai_api_key
-# )
-os.environ["GOOGLE_API_KEY"] = gemini_api_key
-llm_metadata = ChatGoogleGenerativeAI(
-    model="gemini-2.0-flash",
+llm_metadata = ChatOpenAI(
+    model="gpt-3.5-turbo",
     temperature=0.2,
-
+    openai_api_key = openai_api_key
 )
+os.environ["GOOGLE_API_KEY"] = gemini_api_key
 
 # Streamlit에서 소설 파일 업로드
 uploaded_files = st.file_uploader(
@@ -47,16 +42,26 @@ uploaded_files = st.file_uploader(
     type=['txt'],
     accept_multiple_files=True
 )
+# CAPS 분석을 위한 텍스트 분할
+text_splitter = RecursiveCharacterTextSplitter(
+    chunk_size=3500,
+    chunk_overlap=400,
+    separators=["\n\n", ".", "!", "?", "\n"]
+)
 
 novelFullText = ""
 if uploaded_files:
     for uploaded_file in uploaded_files:
         stringio = uploaded_file.read().decode('utf-8')  # 텍스트 파일이 UTF-8 인코딩이라고 가정
         novelFullText += stringio
+    text_chunks = text_splitter.split_text(novelFullText)
     st.success(f"총 {len(uploaded_files)}개의 파일이 업로드되어 분석에 사용됩니다.")
 else:
     st.warning("먼저 소설 텍스트(.txt) 파일을 업로드하세요. 예: 해리포터-마법사의돌-1권.txt")
     st.stop()
+
+
+
 
 model1 = ChatGoogleGenerativeAI(model="gemini-2.0-flash", google_api_key=gemini_api_key, max_output_tokens=7000)
 prompt1 = ChatPromptTemplate.from_messages(
@@ -718,12 +723,24 @@ def create_radar_chart(scores, categories, title):
     )
     return fig
 
+def extract_json_from_codeblock(text):
+    """
+    코드블록(```...```)이 있을 경우 그 안의 내용만 추출해서 반환.
+    없으면 전체를 반환.
+    """
+    # ```로 감싼 블록이 있으면 그 안의 내용만 추출
+    match = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", text)
+    if match:
+        return match.group(1).strip()
+    return text.strip()
 
+def safe_brace(text):
+    return text.replace("{", "{{").replace("}", "}}")
 
 # Streamlit 앱의 메인 함수
 def main():
     st.title("HEXACO-PI-R 성격 설문 분석 및 소설 등장인물 챗봇")
-
+    caps_results = []
     # 등장인물 리스트 버튼
     if 'selected_character' not in st.session_state:
         with st.spinner("등장인물 분석 중..."):
@@ -749,11 +766,12 @@ def main():
     # 분석
     if not st.session_state.responses_submitted:
         st.header(f"{character_name}의 HEXACO 성격 분석")
-        st.write(f"아래 **'결과 보기'** 버튼을 클릭하면 **{character_name}**의 HEXACO 성격 설문 응답을 기반으로 분석을 진행합니다.")
+        st.write(f"아래 **'결과 보기'** 버튼을 클릭하면 **{character_name}**의 HEXACO 성격 설문 응답과 CAPS 행동서명 분석을 동시에 진행합니다.")
 
         user_responses = get_user_responses_for_character(character_name, HEXACO_QUESTIONS)
         if st.button("결과 보기"):
-            with st.spinner(f"{character_name}의 성격을 분석 중입니다..."):
+            with st.spinner(f"{character_name}의 성격 및 CAPS 행동서명 분석 중입니다..."):
+                # ----------- HEXACO 분석 ----------
                 main_factor_scores, facet_scores, altruism_score = calculate_hexaco_scores(
                     user_responses, HEXACO_SCORING_KEY_FACETS, HEXACO_FACTORS_ORDER, ALTRUISM_KEY
                 )
@@ -785,6 +803,49 @@ def main():
                         f"** Altruism (interstitial facet scale): {altruism_score:.2f} - {altruism_interpretation}")
                 final_hexako_parts.append("--------------------------------------")
                 st.session_state.final_hexako_result = "\n".join(final_hexako_parts)
+                system_prompt_content = f"""
+                            너는 사용자가 올린 소설 속 이야기를 기반으로 대화하는 등장인물이다. 너는 소설 속 '{character_name}'처럼 말하고 행동해야 해.
+                            네 성격은 다음 Hexaco 결과에 기반을 두고 있어:
+                            Hexaco 결과: {st.session_state.final_hexako_result}
+
+                            그리고 너의 행동 경향성은 심리학의 CAPS 이론(Cognitive-Affective Personality System)과 DIAMONDS 이론을 활용해 추출된 행동 서명 결과를 참고해야 해.
+                            아래는 DIAMONDS 분석 및 행동 서명 예시야:
+
+                            {chr(10).join(f'- {safe_brace(sig)}' for sig in caps_results)}
+
+                            **너의 임무:**
+                            위의 성격 특성과 행동 경향성을 반드시 참고하여, 사용자의 입력(상황 및 대화)에 대해 가장 '{character_name}'답게, 그리고 일관성 있게 반응해야 해.
+                            상황의 맥락과 내면의 가치관, 반복적 행동패턴(행동 서명)을 깊이 반영해서 대화하라.
+                        """
+                prompt2 = ChatPromptTemplate.from_messages(
+                    [
+                        ("system", system_prompt_content),
+                        MessagesPlaceholder(variable_name="chat_history"),
+                        ("human", "{input}"),
+                    ]
+                )
+                runnable2 = prompt2 | model1
+                with_message_history2 = RunnableWithMessageHistory(
+                    runnable2,
+                    get_session_history,
+                    input_messages_key="input",
+                    history_messages_key="chat_history"
+                )
+
+                # 세션에 저장 (챗봇 진입 전 이미 준비됨!)
+                st.session_state.prompt2 = prompt2
+                st.session_state.runnable2 = runnable2
+                st.session_state.with_message_history2 = with_message_history2
+
+                # **챗봇 LLM 세션 미리 초기화까지**
+                st.session_state.with_message_history2.invoke(
+                    {"input": HumanMessage(content=f"""{novelFullText}... 여기까지가 소설 내용이야. 넌 여기서 나오는 등장인물이고
+                                넌 이 소설 내용 속 등장인물 '{character_name}'로서, 독자인 '나'와 이 소설에 대해 자유롭게 이야기해 줘. 등장인물의 성격과 감정을 담아서 말이야. 예를 들어, 소설 속 어떤 부분이 가장 인상 깊었는지, 특정 인물이나 사건에 대해 어떻게 생각하는지 등, 등장인물 관점에서 설명해 줘.
+                                이제 나와 대화해 줘. """)},
+                    config={"configurable": {"session_id": f"abcd_{character_name}_chat"}},
+                )
+                st.session_state.system_prompt_init = True
+
             st.rerun()
 
     # 결과 및 챗봇
@@ -872,6 +933,212 @@ def main():
         st.warning("참고: 하위 척도는 내적 일관성 신뢰도가 높지 않을 수 있으며, 주요 요인 점수가 더 신뢰할 수 있습니다.")
 
         st.write("---")
+        st.header(f"{character_name}의 소설 내 상황-행동 패턴 분석 (CAPS)")
+
+        if 'caps_results' not in st.session_state or not st.session_state.caps_results:
+            # 8-1. 메타데이터 프롬프트 (system_caps_msg)
+            system_caps_msg = SystemMessage(content=
+                                            """
+                                            당신은 소설 텍스트로부터 메타데이터를 추출하는 분석 도우미입니다.
+                                            다음은 소설의 한 부분입니다. 
+                                            텍스트를 읽고, 아래 항목을 바탕으로 정보를 **정확한 JSON 형식**으로 추출하세요. 
+                                            응답에는 반드시 **JSON만 출력**하십시오. 설명, 해설, 주석은 절대 포함하지 마세요.
+
+                                            [situation 추출 방법]
+                                            1. 상황 유형은 DIAMONDS 분류 체계를 기반으로 아래의 상황 유형 목록을 참고하고,각 상위 유형 안에서 적절한 하위 유형을 모두 situation_detail에 추출하세요.
+                                            2. 추출된 하위 유형들의 상위 유형을 계산하여, 상위 유형별 비율(%)을 계산하여 situation_weight에 추출하세요.
+                                                예) 하위 유형이 Duty에서 3개, Adversity에서 1개 추출되었을 경우
+                                                → situation_type: ["Duty", "Adversity"]
+                                                → situation_weight: { "Duty": 75, "Adversity": 25 }
+                                            3. situation_weight에 포함된 모든 상위 유형 각각에 대해, 그 하위 유형들을 함께 병기하여 situation_name에 추출하세요.
+                                                구체적 설명: "상위 유형: 하위 유형1.../ 상위 유형: 하위 유형1... "으로 상위유형과 관련된 하위 유형들을 함께 병기한 상황명.  
+                                                            -> 예시 형식: 'Deception: Lying, Social Persona / Duty: Responsibility'
+
+
+                                            [상황 유형 목록]
+                                            # DIAMONDS 하위 유형 사전
+                                            DIAMONDS_DETAIL_DICT = {
+                                                "Duty": ["Responsibility", "Integrity", "Loyalty", "Norm Compliance", "Self-sacrifice", "Diligence"],
+                                                "Intellect": ["Analytical Thinking", "Creativity", "Learning Ability", "Critical Thinking", "Curiosity", "Logical Reasoning"],
+                                                "Adversity": ["Resilience", "Patience", "Fear Overcoming", "Stress Management", "Crisis Response", "Frustration Tolerance"],
+                                                "Mating": ["Attractiveness", "Mate Preference", "Courtship Behavior", "Jealousy", "Sexual Preference", "Relationship Maintenance"],
+                                                "positivity": ["Optimism", "Gratitude", "Hopefulness", "Self-affirmation", "Sense of Humor", "Happiness Pursuit"],
+                                                "Negativity": ["Anxiety", "Depression", "Anger", "Self-deprecation", "Cynicism", "Social Alienation"],
+                                                "Deception": ["Lying", "Concealment", "Camouflage Strategy", "Duplicity", "Manipulativeness", "Social Persona"],
+                                                "Sociality": ["Empathy", "Cooperativeness", "Communication Skill", "Interpersonal Appeal", "Norm Awareness", "Relationship Building"]
+                                            }
+
+                                            # 한글 카테고리명
+                                            DIAMONDS_KO_LABEL = {
+                                                "Duty": "의무", "Intellect": "지성", "Adversity": "역경", "Mating": "교제",
+                                                "positivity": "긍정성", "Negativity": "부정성", "Deception": "기만", "Sociality": "사교성"
+                                            }
+
+                                            [출력할 메타데이터 항목]
+                                            - character: 사건을 주도하거나 직접 겪는 주요 인물 (한 명만)
+                                            - situation_type: 인물이 처한 핵심 사건의 상위 유형 (복수 가능)
+                                            - situation_detail: 해당 상황의 세부 유형 (복수 가능)
+                                            - situation_weight: 상위 유형별 가중치 비율 (%). 비율의 총합은 100이 되도록 조정
+                                            - situation_name: **규칙:situation_detail에 추출된 모든 하위 유형을 빠짐없이situation_name에 포함시켜야 합니다. 절대로 일부를 생략해서는 안 됩니다.
+                                                ** 형식 "상위 유형: 하위 유형1.../ 상위 유형: 하위 유형1... "으로 상위유형과 관련된 하위 유형들을 함께 병기한 상황명.  
+                                                ** 예시 형식: 'Deception: Lying, Social Persona / Duty: Responsibility'
+                                            - emotion: 이 인물이 느끼는 핵심 감정들 (복수 가능)
+                                            - action: 이 인물이 취한 행동 또는 반응
+                                            - belief: 이 인물이 상황을 해석하고 행동하게 만든 신념 또는 가치
+                                            - goal: 이 인물이 행동을 통해 달성하려는 의도
+
+                                            [추가 규칙]
+                                            - 여러 상황이 명확히 분리될 경우, 각각 JSON 객체로 나누고 리스트 형태로 출력하세요.
+                                            - 직접 연결된 단일 상황이라면 하나의 상황으로 묶어도 무방합니다.
+                                            - 정보가 명확하지 않다면 어떻게든 비슷한 유형을 판단하고 분류도도록 하십시오.
+                                            - 결과는 반드시 JSON 배열(list) 형식으로 출력하세요.
+                                            - 등장인물의 이름은 반드시 풀네임으로 말해 주세요.
+
+                                            [출력 예시]
+                                            [
+                                              {
+                                                "character": "해리 포터",
+                                                "situation_type": ["Deception", "Duty"],
+                                                "situation_detail": ["Lying", "Manipulation", "Responsibility"],
+                                                "situation_weight": {"Deception": 66,"Duty": 34},
+                                                "situation_name": Deception: Lying, Manipulation / Duty: Responsibility",
+                                                "emotion": ["경계심", "책임감"],
+                                                "action": "상대의 의도를 의심하고 통제권을 유지하려 함",
+                                                "belief": "타인은 나를 속일 수 있으므로 내가 통제해야 한다",
+                                                "goal": "상황을 장악하고 위험을 차단하기 위해"
+                                              }
+                                            ]
+                                            """
+                                            )
+            # 8-2. 행동 서명 프롬프트 (system_caps2_msg)
+            system_caps2_msg = SystemMessage(content=
+                                             """당신은 성격 심리학의 CAPS 이론(Cognitive-Affective Personality System)을 기반으로 
+                                             특정 인물이 특정 상황 유형에서 반복적으로 보이는 행동 패턴을 요약하는 분석 전문가입니다.
+
+                                             CAPS 이론은 다음과 같은 전제를 가지고 있습니다:
+                                             - 사람은 각기 다르게 상황을 해석하고, 그 해석과 신념, 목표에 기반해 감정과 행동이 형성됩니다.
+                                             - 특정 인물은 특정 상황에서 반복적으로 유사한 해석과 행동을 보이는 경향성이 있으며, 이것을 행동 서명이라 부릅니다.
+
+                                             다음은 하나의 인물(character)이 DIAMONDS 8가지 상황 유형 중 **복수의 상황 유형**에 동시에 놓여 있는 메타데이터입니다.  
+                                             당신의 임무는 이 데이터를 분석하여 다음 두 가지 정보를 생성하세요:
+
+                                             1. 여러 상황 유형 조합에 해당하는 **행동 서명 1개**
+                                             2. 주어진 상황 유형별 가중치(situation_weight)를 JSON으로 그대로 출력
+
+                                             [입력 항목]
+                                             - situation_name: 각 상위 유형에 대해 해당하는 하위 유형들을 함께 병기하세요.
+                                               형식: 'Deception: Lying, Manipulation / Duty: Responsibility'
+                                             - situation_type에 속하는 situation_detail을 나열하여 전달받기기
+                                             - emotion: 인물이 느낀 감정들
+                                             - action: 인물이 취한 행동
+                                             - belief: 행동을 유도한 신념 또는 가치관
+                                             - goal: 행동을 통해 달성하려는 목적
+                                             - situation_weight: 상황 유형별 가중치 (예: {"Deception": 66, "Duty": 34})
+
+                                             [출력 규칙]
+                                             - 반드시 **JSON 배열(list)**로 출력하세요.
+                                             - 첫 번째 JSON 객체는 If–Then 형식의 행동 서명입니다.
+                                             - 행동 서명 문장의 상황 부분은 **입력으로 받은 situation_name의 내용을 그대로 반영**해야 합니다. **입력된 모든 상위 유형과 그에 해당하는 하위 유형을 빠짐없이 정확히 포함**하여 작성하십시오.
+                                             - 두 번째 JSON 객체는 situation_weight 항목은 이번 프롬포트로 추출되는 [상황]에 대하여 산정하여 작성하시오
+                                             - 행동 서명 문장은 **상황들이 복합적으로 작용했을 때의 공통된 경향성**을 일반화하여 1~2문장으로 기술하세요.
+                                             - 출력물의 상황유형은 '상황유형': '하위유형', '하위유형'.... 의 형식으로 해당하는 하위 내용을 모두 출력하도록 하시오.
+
+                                             [출력 예시]
+                                             [
+                                              { "만약 인물이 상황을 'Deception: Lying, Manipulation / Duty: Responsibility'이라고 인식한다면,  
+                                                 그는 '상대의 의도를 경계하면서도 조직적 통제를 유지하려는 경향이 있다.'" },
+                                              { "상황 가중치 비율": {"Deception": 66, "Duty": 34}}
+                                             ]
+
+                                             [작성 가이드]
+                                             - situation_name은 **입력으로 받은 데이터를 그대로 인용하여 사용**하세요. (단일 또는 다중 카테고리 모두 가능)
+                                             - 행동 표현은 추상적 경향성을 담고 있어야 하며, 특정 인물·도구·보상 중심이어선 안 됩니다.
+                                             - 복수 상황의 상호작용을 반영한 ‘통합적 태도’나 ‘우선 반응 경향’을 중심으로 서술하세요.
+                                             - belief, emotion, goal 간의 인과적 흐름을 고려해 행동 서명 문장을 구성하세요.
+                                             """
+                                             )
+
+            # 9. 분석 실행 (본 코드와 거의 동일)
+            if 'caps_results' not in st.session_state or st.session_state.get('caps_character') != character_name:
+                results = []
+                for chunk in text_chunks:
+                    human_msg = HumanMessage(content=f"소설 내용:\n\"\"\"\n{chunk}\n\"\"\"")
+                    response = llm_metadata.invoke([system_caps_msg, human_msg])
+                    results.append(response.content)
+
+                parsed = []
+                for idx, r in enumerate(results):
+                    try:
+                        json_str = extract_json_from_codeblock(r)
+                        parsed += json.loads(json_str)
+                    except Exception as e:
+                        print(f"JSON 파싱 실패 at idx {idx}: {e}")
+                        print("------ RAW 응답 ------")
+                        print(r)
+                print(f"parsed 개수: {len(parsed)}")
+                print(parsed)
+
+                filtered_entries = [e for e in parsed if e["character"] == character_name]
+                grouped_by_situation = defaultdict(list)
+                caps_results = []
+                for entry in filtered_entries:
+                    for situation in entry.get("situation_type", []):
+                        grouped_by_situation[situation].append(entry)
+
+                for situation, entries in grouped_by_situation.items():
+                    entry = entries[0]  # 대표 샘플
+                    situation_name = entry["situation_name"]
+                    situation_weight = entry["situation_weight"]
+                    emotion = entry["emotion"]
+                    belief = entry["belief"]
+                    action = entry["action"]
+                    goal = entry["goal"]
+
+                    prompt = f"""다음은 '{character_name}'가 '{situation}' 상황에서 반복적으로 보이는 행동 양식입니다.
+                                - 상황 분류(situation_name): {situation_name}
+                                - 상황 가중치(situation_weight): {situation_weight}
+                                - 감정(emotion): {emotion}
+                                - 신념(belief): {belief}
+                                - 행동(action): {action}
+                                - 목표(goal): {goal}
+
+                                이 정보를 바탕으로 CAPS 이론 기반 If–Then 행동 서명을 생성하세요.
+                                """
+                    human_msg = HumanMessage(content=prompt.strip())
+                    try:
+                        response = llm_metadata.invoke([system_caps2_msg, human_msg])
+                        caps_results.append(response.content.strip())
+                    except Exception as e:
+                        st.warning(f"❌ LLM 오류 at situation '{situation}': {e}")
+
+                # 세션 상태에 분석 결과 캐싱!
+                st.session_state.caps_results = caps_results
+                st.session_state.caps_character = character_name
+
+                # 파일로 저장도 1회만!
+                with open(f'caps_results_{character_name}.txt', 'w', encoding='utf-8') as f:
+                    for sig in caps_results:
+                        f.write(str(sig) + '\n')
+
+                # Streamlit 결과 표시
+                if caps_results:
+                    for sig in caps_results:
+                        st.markdown(f"```\n{sig}\n```")
+                else:
+                    st.warning("행동서명 분석 결과가 없습니다.")
+
+            else:
+                # 이미 분석 결과가 있으면 재사용 (LLM 호출 없이 바로 출력)
+                for sig in st.session_state.caps_results:
+                    st.markdown(f"```\n{sig}\n```")
+        # CAPS 결과는 항상 표시
+        if "caps_results" in st.session_state and st.session_state.caps_results:
+            st.header(f"{character_name}의 소설 내 상황-행동 패턴 분석 (CAPS)")
+            for sig in st.session_state.caps_results:
+                st.markdown(f"```\n{sig}\n```")
+
+
+        st.write("---")
         st.header(f"2단계: {character_name}와 대화하기")
         st.write(f"이제 {character_name}의 성격 분석 결과를 토대로 {character_name}와 대화할 수 있습니다.")
 
@@ -881,37 +1148,23 @@ def main():
                 st.markdown(message["content"])
 
         # 채팅 입력 처리
+        # 채팅 입력 처리 (이제 if "system_prompt_init" 체크 안 해도 됨!)
         if prompt := st.chat_input(f"{character_name}에게 말을 걸어보세요!"):
             st.session_state.chat_history.append({"role": "user", "content": prompt})
             with st.chat_message("user"):
                 st.markdown(prompt)
-            prompt2 = ChatPromptTemplate.from_messages(
-                [
-                    (
-                        "system",
-                        f"""너는 사용자가 올린 소설 속 이야기를 기반으로 대화하는 등장인물이다. 너는 소설 속 '{character_name}'처럼 말하고 행동해야 해. 네 성격은 다음 Hexaco 결과에 기반을 두고 있어:
-                            Hexaco 결과: {st.session_state.final_hexako_result}""",
-                    ),
-                    MessagesPlaceholder(variable_name="chat_history"),
-                    ("human", "{input}"),
-                ]
-            )
-            runnable2 = prompt2 | model1
-            with_message_history2 = RunnableWithMessageHistory(
-                runnable2,
-                get_session_history,
-                input_messages_key="input",
-                history_messages_key="chat_history"
-            )
+
             with st.chat_message("assistant"):
                 with st.spinner(f"{character_name}가 생각 중..."):
-                    response_content = with_message_history2.invoke(
+                    # 바로 응답 (이미 초기화되어 있음)
+                    response_content = st.session_state.with_message_history2.invoke(
                         {"input": HumanMessage(content=prompt)},
                         config={"configurable": {"session_id": f"abcd_{character_name}_chat"}},
                     )
-                    full_response = response_content.content
-                    st.markdown(full_response)
-                    st.session_state.chat_history.append({"role": "assistant", "content": full_response})
+                    if response_content is not None:
+                        full_response = response_content.content
+                        st.markdown(full_response)
+                        st.session_state.chat_history.append({"role": "assistant", "content": full_response})
 
 
 if __name__ == '__main__':
