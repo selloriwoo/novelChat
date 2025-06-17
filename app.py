@@ -723,6 +723,217 @@ def create_radar_chart(scores, categories, title):
     )
     return fig
 
+def analyze_caps_signatures(
+    character_name,
+    text_chunks,
+    llm_metadata,
+    extract_json_from_codeblock,
+    st,
+    save_to_file=True
+):
+    """
+        소설 텍스트 청크, 인물명, LLM 객체를 받아 CAPS 행동서명을 추출.
+        결과는 행동서명 리스트(caps_results)로 반환.
+
+        Args:
+            character_name (str): 분석할 등장인물 이름
+            text_chunks (list[str]): 소설 텍스트를 분할한 청크 리스트
+            llm_metadata: langchain_openai.ChatOpenAI 객체
+            extract_json_from_codeblock: 코드블록에서 json을 추출하는 함수
+            st: streamlit 모듈 (세션/마크다운 등)
+            save_to_file (bool): txt 파일로 결과 저장 여부
+
+        Returns:
+            list: CAPS 행동서명 결과 리스트
+        """
+    # 8-1. 메타데이터 프롬프트
+    system_caps_msg = SystemMessage(content="""
+                                            당신은 소설 텍스트로부터 메타데이터를 추출하는 분석 도우미입니다.
+                                            다음은 소설의 한 부분입니다. 
+                                            텍스트를 읽고, 아래 항목을 바탕으로 정보를 **정확한 JSON 형식**으로 추출하세요. 
+                                            응답에는 반드시 **JSON만 출력**하십시오. 설명, 해설, 주석은 절대 포함하지 마세요.
+
+                                            [situation 추출 방법]
+                                            1. 상황 유형은 DIAMONDS 분류 체계를 기반으로 아래의 상황 유형 목록을 참고하고,각 상위 유형 안에서 적절한 하위 유형을 모두 situation_detail에 추출하세요.
+                                            2. 추출된 하위 유형들의 상위 유형을 계산하여, 상위 유형별 비율(%)을 계산하여 situation_weight에 추출하세요.
+                                                예) 하위 유형이 Duty에서 3개, Adversity에서 1개 추출되었을 경우
+                                                → situation_type: ["Duty", "Adversity"]
+                                                → situation_weight: { "Duty": 75, "Adversity": 25 }
+                                            3. situation_weight에 포함된 모든 상위 유형 각각에 대해, 그 하위 유형들을 함께 병기하여 situation_name에 추출하세요.
+                                                구체적 설명: "상위 유형: 하위 유형1.../ 상위 유형: 하위 유형1... "으로 상위유형과 관련된 하위 유형들을 함께 병기한 상황명.  
+                                                            -> 예시 형식: 'Deception: Lying, Social Persona / Duty: Responsibility'
+
+
+                                            [상황 유형 목록]
+                                            # DIAMONDS 하위 유형 사전
+                                            DIAMONDS_DETAIL_DICT = {
+                                                "Duty": ["Responsibility", "Integrity", "Loyalty", "Norm Compliance", "Self-sacrifice", "Diligence"],
+                                                "Intellect": ["Analytical Thinking", "Creativity", "Learning Ability", "Critical Thinking", "Curiosity", "Logical Reasoning"],
+                                                "Adversity": ["Resilience", "Patience", "Fear Overcoming", "Stress Management", "Crisis Response", "Frustration Tolerance"],
+                                                "Mating": ["Attractiveness", "Mate Preference", "Courtship Behavior", "Jealousy", "Sexual Preference", "Relationship Maintenance"],
+                                                "positivity": ["Optimism", "Gratitude", "Hopefulness", "Self-affirmation", "Sense of Humor", "Happiness Pursuit"],
+                                                "Negativity": ["Anxiety", "Depression", "Anger", "Self-deprecation", "Cynicism", "Social Alienation"],
+                                                "Deception": ["Lying", "Concealment", "Camouflage Strategy", "Duplicity", "Manipulativeness", "Social Persona"],
+                                                "Sociality": ["Empathy", "Cooperativeness", "Communication Skill", "Interpersonal Appeal", "Norm Awareness", "Relationship Building"]
+                                            }
+
+                                            # 한글 카테고리명
+                                            DIAMONDS_KO_LABEL = {
+                                                "Duty": "의무", "Intellect": "지성", "Adversity": "역경", "Mating": "교제",
+                                                "positivity": "긍정성", "Negativity": "부정성", "Deception": "기만", "Sociality": "사교성"
+                                            }
+
+                                            [출력할 메타데이터 항목]
+                                            - character: 사건을 주도하거나 직접 겪는 주요 인물 (한 명만)
+                                            - situation_type: 인물이 처한 핵심 사건의 상위 유형 (복수 가능)
+                                            - situation_detail: 해당 상황의 세부 유형 (복수 가능)
+                                            - situation_weight: 상위 유형별 가중치 비율 (%). 비율의 총합은 100이 되도록 조정
+                                            - situation_name: **규칙:situation_detail에 추출된 모든 하위 유형을 빠짐없이situation_name에 포함시켜야 합니다. 절대로 일부를 생략해서는 안 됩니다.
+                                                ** 형식 "상위 유형: 하위 유형1.../ 상위 유형: 하위 유형1... "으로 상위유형과 관련된 하위 유형들을 함께 병기한 상황명.  
+                                                ** 예시 형식: 'Deception: Lying, Social Persona / Duty: Responsibility'
+                                            - emotion: 이 인물이 느끼는 핵심 감정들 (복수 가능)
+                                            - action: 이 인물이 취한 행동 또는 반응
+                                            - belief: 이 인물이 상황을 해석하고 행동하게 만든 신념 또는 가치
+                                            - goal: 이 인물이 행동을 통해 달성하려는 의도
+
+                                            [추가 규칙]
+                                            - 여러 상황이 명확히 분리될 경우, 각각 JSON 객체로 나누고 리스트 형태로 출력하세요.
+                                            - 직접 연결된 단일 상황이라면 하나의 상황으로 묶어도 무방합니다.
+                                            - 정보가 명확하지 않다면 어떻게든 비슷한 유형을 판단하고 분류도도록 하십시오.
+                                            - 결과는 반드시 JSON 배열(list) 형식으로 출력하세요.
+                                            - 등장인물의 이름은 반드시 풀네임으로 말해 주세요.
+
+                                            [출력 예시]
+                                            [
+                                              {
+                                                "character": "해리 포터",
+                                                "situation_type": ["Deception", "Duty"],
+                                                "situation_detail": ["Lying", "Manipulation", "Responsibility"],
+                                                "situation_weight": {"Deception": 66,"Duty": 34},
+                                                "situation_name": Deception: Lying, Manipulation / Duty: Responsibility",
+                                                "emotion": ["경계심", "책임감"],
+                                                "action": "상대의 의도를 의심하고 통제권을 유지하려 함",
+                                                "belief": "타인은 나를 속일 수 있으므로 내가 통제해야 한다",
+                                                "goal": "상황을 장악하고 위험을 차단하기 위해"
+                                              }
+                                            ]
+                                            """)
+    # 8-2. CAPS 행동서명 프롬프트
+    system_caps2_msg = SystemMessage(content="""당신은 성격 심리학의 CAPS 이론(Cognitive-Affective Personality System)을 기반으로 
+                                             특정 인물이 특정 상황 유형에서 반복적으로 보이는 행동 패턴을 요약하는 분석 전문가입니다.
+
+                                             CAPS 이론은 다음과 같은 전제를 가지고 있습니다:
+                                             - 사람은 각기 다르게 상황을 해석하고, 그 해석과 신념, 목표에 기반해 감정과 행동이 형성됩니다.
+                                             - 특정 인물은 특정 상황에서 반복적으로 유사한 해석과 행동을 보이는 경향성이 있으며, 이것을 행동 서명이라 부릅니다.
+
+                                             다음은 하나의 인물(character)이 DIAMONDS 8가지 상황 유형 중 **복수의 상황 유형**에 동시에 놓여 있는 메타데이터입니다.  
+                                             당신의 임무는 이 데이터를 분석하여 다음 두 가지 정보를 생성하세요:
+
+                                             1. 여러 상황 유형 조합에 해당하는 **행동 서명 1개**
+                                             2. 주어진 상황 유형별 가중치(situation_weight)를 JSON으로 그대로 출력
+
+                                             [입력 항목]
+                                             - situation_name: 각 상위 유형에 대해 해당하는 하위 유형들을 함께 병기하세요.
+                                               형식: 'Deception: Lying, Manipulation / Duty: Responsibility'
+                                             - situation_type에 속하는 situation_detail을 나열하여 전달받기기
+                                             - emotion: 인물이 느낀 감정들
+                                             - action: 인물이 취한 행동
+                                             - belief: 행동을 유도한 신념 또는 가치관
+                                             - goal: 행동을 통해 달성하려는 목적
+                                             - situation_weight: 상황 유형별 가중치 (예: {"Deception": 66, "Duty": 34})
+
+                                             [출력 규칙]
+                                             - 반드시 **JSON 배열(list)**로 출력하세요.
+                                             - 첫 번째 JSON 객체는 If–Then 형식의 행동 서명입니다.
+                                             - 행동 서명 문장의 상황 부분은 **입력으로 받은 situation_name의 내용을 그대로 반영**해야 합니다. **입력된 모든 상위 유형과 그에 해당하는 하위 유형을 빠짐없이 정확히 포함**하여 작성하십시오.
+                                             - 두 번째 JSON 객체는 situation_weight 항목은 이번 프롬포트로 추출되는 [상황]에 대하여 산정하여 작성하시오
+                                             - 행동 서명 문장은 **상황들이 복합적으로 작용했을 때의 공통된 경향성**을 일반화하여 1~2문장으로 기술하세요.
+                                             - 출력물의 상황유형은 '상황유형': '하위유형', '하위유형'.... 의 형식으로 해당하는 하위 내용을 모두 출력하도록 하시오.
+
+                                             [출력 예시]
+                                             [
+                                              { "만약 인물이 상황을 'Deception: Lying, Manipulation / Duty: Responsibility'이라고 인식한다면,  
+                                                 그는 '상대의 의도를 경계하면서도 조직적 통제를 유지하려는 경향이 있다.'" },
+                                              { "상황 가중치 비율": {"Deception": 66, "Duty": 34}}
+                                             ]
+
+                                             [작성 가이드]
+                                             - situation_name은 **입력으로 받은 데이터를 그대로 인용하여 사용**하세요. (단일 또는 다중 카테고리 모두 가능)
+                                             - 행동 표현은 추상적 경향성을 담고 있어야 하며, 특정 인물·도구·보상 중심이어선 안 됩니다.
+                                             - 복수 상황의 상호작용을 반영한 ‘통합적 태도’나 ‘우선 반응 경향’을 중심으로 서술하세요.
+                                             - belief, emotion, goal 간의 인과적 흐름을 고려해 행동 서명 문장을 구성하세요.
+                                             """)
+
+    results = []
+    for chunk in text_chunks:
+        human_msg = HumanMessage(content=f"소설 내용:\n\"\"\"\n{chunk}\n\"\"\"")
+        response = llm_metadata.invoke([system_caps_msg, human_msg])
+        results.append(response.content)
+
+    parsed = []
+    for idx, r in enumerate(results):
+        try:
+            json_str = extract_json_from_codeblock(r)
+            parsed += json.loads(json_str)
+        except Exception as e:
+            print(f"JSON 파싱 실패 at idx {idx}: {e}")
+            print("------ RAW 응답 ------")
+            print(r)
+    print(f"parsed 개수: {len(parsed)}")
+    print(parsed)
+
+    filtered_entries = [e for e in parsed if e["character"] == character_name]
+    grouped_by_situation = defaultdict(list)
+    caps_results = []
+    for entry in filtered_entries:
+        for situation in entry.get("situation_type", []):
+            grouped_by_situation[situation].append(entry)
+
+    for situation, entries in grouped_by_situation.items():
+        entry = entries[0]  # 대표 샘플
+        situation_name = entry["situation_name"]
+        situation_weight = entry["situation_weight"]
+        emotion = entry["emotion"]
+        belief = entry["belief"]
+        action = entry["action"]
+        goal = entry["goal"]
+
+        prompt = f"""다음은 '{character_name}'가 '{situation}' 상황에서 반복적으로 보이는 행동 양식입니다.
+                        - 상황 분류(situation_name): {situation_name}
+                        - 상황 가중치(situation_weight): {situation_weight}
+                        - 감정(emotion): {emotion}
+                        - 신념(belief): {belief}
+                        - 행동(action): {action}
+                        - 목표(goal): {goal}
+
+                        이 정보를 바탕으로 CAPS 이론 기반 If–Then 행동 서명을 생성하세요.
+                        """
+        human_msg = HumanMessage(content=prompt.strip())
+        try:
+            response = llm_metadata.invoke([system_caps2_msg, human_msg])
+            caps_results.append(response.content.strip())
+        except Exception as e:
+            st.warning(f"❌ LLM 오류 at situation '{situation}': {e}")
+
+    # 세션 상태에 분석 결과 캐싱!
+    st.session_state.caps_results = caps_results
+    st.session_state.caps_character = character_name
+
+    # 파일로 저장도 1회만!
+    if save_to_file:
+        with open(f'caps_results_{character_name}.txt', 'w', encoding='utf-8') as f:
+            for sig in caps_results:
+                f.write(str(sig) + '\n')
+
+    # Streamlit 결과 표시
+    if caps_results:
+        for sig in caps_results:
+            st.markdown(f"```\n{sig}\n```")
+    else:
+        st.warning("행동서명 분석 결과가 없습니다.")
+
+    return caps_results
+
 def extract_json_from_codeblock(text):
     """
     코드블록(```...```)이 있을 경우 그 안의 내용만 추출해서 반환.
@@ -935,202 +1146,20 @@ def main():
         st.write("---")
         st.header(f"{character_name}의 소설 내 상황-행동 패턴 분석 (CAPS)")
 
-        if 'caps_results' not in st.session_state or not st.session_state.caps_results:
-            # 8-1. 메타데이터 프롬프트 (system_caps_msg)
-            system_caps_msg = SystemMessage(content=
-                                            """
-                                            당신은 소설 텍스트로부터 메타데이터를 추출하는 분석 도우미입니다.
-                                            다음은 소설의 한 부분입니다. 
-                                            텍스트를 읽고, 아래 항목을 바탕으로 정보를 **정확한 JSON 형식**으로 추출하세요. 
-                                            응답에는 반드시 **JSON만 출력**하십시오. 설명, 해설, 주석은 절대 포함하지 마세요.
+        if 'caps_results' not in st.session_state or st.session_state.get('caps_character') != character_name:
+                analyze_caps_signatures(
+                    character_name,
+                    text_chunks,
+                    llm_metadata,
+                    extract_json_from_codeblock,
+                    st,
+                    save_to_file=True
+                )
 
-                                            [situation 추출 방법]
-                                            1. 상황 유형은 DIAMONDS 분류 체계를 기반으로 아래의 상황 유형 목록을 참고하고,각 상위 유형 안에서 적절한 하위 유형을 모두 situation_detail에 추출하세요.
-                                            2. 추출된 하위 유형들의 상위 유형을 계산하여, 상위 유형별 비율(%)을 계산하여 situation_weight에 추출하세요.
-                                                예) 하위 유형이 Duty에서 3개, Adversity에서 1개 추출되었을 경우
-                                                → situation_type: ["Duty", "Adversity"]
-                                                → situation_weight: { "Duty": 75, "Adversity": 25 }
-                                            3. situation_weight에 포함된 모든 상위 유형 각각에 대해, 그 하위 유형들을 함께 병기하여 situation_name에 추출하세요.
-                                                구체적 설명: "상위 유형: 하위 유형1.../ 상위 유형: 하위 유형1... "으로 상위유형과 관련된 하위 유형들을 함께 병기한 상황명.  
-                                                            -> 예시 형식: 'Deception: Lying, Social Persona / Duty: Responsibility'
-
-
-                                            [상황 유형 목록]
-                                            # DIAMONDS 하위 유형 사전
-                                            DIAMONDS_DETAIL_DICT = {
-                                                "Duty": ["Responsibility", "Integrity", "Loyalty", "Norm Compliance", "Self-sacrifice", "Diligence"],
-                                                "Intellect": ["Analytical Thinking", "Creativity", "Learning Ability", "Critical Thinking", "Curiosity", "Logical Reasoning"],
-                                                "Adversity": ["Resilience", "Patience", "Fear Overcoming", "Stress Management", "Crisis Response", "Frustration Tolerance"],
-                                                "Mating": ["Attractiveness", "Mate Preference", "Courtship Behavior", "Jealousy", "Sexual Preference", "Relationship Maintenance"],
-                                                "positivity": ["Optimism", "Gratitude", "Hopefulness", "Self-affirmation", "Sense of Humor", "Happiness Pursuit"],
-                                                "Negativity": ["Anxiety", "Depression", "Anger", "Self-deprecation", "Cynicism", "Social Alienation"],
-                                                "Deception": ["Lying", "Concealment", "Camouflage Strategy", "Duplicity", "Manipulativeness", "Social Persona"],
-                                                "Sociality": ["Empathy", "Cooperativeness", "Communication Skill", "Interpersonal Appeal", "Norm Awareness", "Relationship Building"]
-                                            }
-
-                                            # 한글 카테고리명
-                                            DIAMONDS_KO_LABEL = {
-                                                "Duty": "의무", "Intellect": "지성", "Adversity": "역경", "Mating": "교제",
-                                                "positivity": "긍정성", "Negativity": "부정성", "Deception": "기만", "Sociality": "사교성"
-                                            }
-
-                                            [출력할 메타데이터 항목]
-                                            - character: 사건을 주도하거나 직접 겪는 주요 인물 (한 명만)
-                                            - situation_type: 인물이 처한 핵심 사건의 상위 유형 (복수 가능)
-                                            - situation_detail: 해당 상황의 세부 유형 (복수 가능)
-                                            - situation_weight: 상위 유형별 가중치 비율 (%). 비율의 총합은 100이 되도록 조정
-                                            - situation_name: **규칙:situation_detail에 추출된 모든 하위 유형을 빠짐없이situation_name에 포함시켜야 합니다. 절대로 일부를 생략해서는 안 됩니다.
-                                                ** 형식 "상위 유형: 하위 유형1.../ 상위 유형: 하위 유형1... "으로 상위유형과 관련된 하위 유형들을 함께 병기한 상황명.  
-                                                ** 예시 형식: 'Deception: Lying, Social Persona / Duty: Responsibility'
-                                            - emotion: 이 인물이 느끼는 핵심 감정들 (복수 가능)
-                                            - action: 이 인물이 취한 행동 또는 반응
-                                            - belief: 이 인물이 상황을 해석하고 행동하게 만든 신념 또는 가치
-                                            - goal: 이 인물이 행동을 통해 달성하려는 의도
-
-                                            [추가 규칙]
-                                            - 여러 상황이 명확히 분리될 경우, 각각 JSON 객체로 나누고 리스트 형태로 출력하세요.
-                                            - 직접 연결된 단일 상황이라면 하나의 상황으로 묶어도 무방합니다.
-                                            - 정보가 명확하지 않다면 어떻게든 비슷한 유형을 판단하고 분류도도록 하십시오.
-                                            - 결과는 반드시 JSON 배열(list) 형식으로 출력하세요.
-                                            - 등장인물의 이름은 반드시 풀네임으로 말해 주세요.
-
-                                            [출력 예시]
-                                            [
-                                              {
-                                                "character": "해리 포터",
-                                                "situation_type": ["Deception", "Duty"],
-                                                "situation_detail": ["Lying", "Manipulation", "Responsibility"],
-                                                "situation_weight": {"Deception": 66,"Duty": 34},
-                                                "situation_name": Deception: Lying, Manipulation / Duty: Responsibility",
-                                                "emotion": ["경계심", "책임감"],
-                                                "action": "상대의 의도를 의심하고 통제권을 유지하려 함",
-                                                "belief": "타인은 나를 속일 수 있으므로 내가 통제해야 한다",
-                                                "goal": "상황을 장악하고 위험을 차단하기 위해"
-                                              }
-                                            ]
-                                            """
-                                            )
-            # 8-2. 행동 서명 프롬프트 (system_caps2_msg)
-            system_caps2_msg = SystemMessage(content=
-                                             """당신은 성격 심리학의 CAPS 이론(Cognitive-Affective Personality System)을 기반으로 
-                                             특정 인물이 특정 상황 유형에서 반복적으로 보이는 행동 패턴을 요약하는 분석 전문가입니다.
-
-                                             CAPS 이론은 다음과 같은 전제를 가지고 있습니다:
-                                             - 사람은 각기 다르게 상황을 해석하고, 그 해석과 신념, 목표에 기반해 감정과 행동이 형성됩니다.
-                                             - 특정 인물은 특정 상황에서 반복적으로 유사한 해석과 행동을 보이는 경향성이 있으며, 이것을 행동 서명이라 부릅니다.
-
-                                             다음은 하나의 인물(character)이 DIAMONDS 8가지 상황 유형 중 **복수의 상황 유형**에 동시에 놓여 있는 메타데이터입니다.  
-                                             당신의 임무는 이 데이터를 분석하여 다음 두 가지 정보를 생성하세요:
-
-                                             1. 여러 상황 유형 조합에 해당하는 **행동 서명 1개**
-                                             2. 주어진 상황 유형별 가중치(situation_weight)를 JSON으로 그대로 출력
-
-                                             [입력 항목]
-                                             - situation_name: 각 상위 유형에 대해 해당하는 하위 유형들을 함께 병기하세요.
-                                               형식: 'Deception: Lying, Manipulation / Duty: Responsibility'
-                                             - situation_type에 속하는 situation_detail을 나열하여 전달받기기
-                                             - emotion: 인물이 느낀 감정들
-                                             - action: 인물이 취한 행동
-                                             - belief: 행동을 유도한 신념 또는 가치관
-                                             - goal: 행동을 통해 달성하려는 목적
-                                             - situation_weight: 상황 유형별 가중치 (예: {"Deception": 66, "Duty": 34})
-
-                                             [출력 규칙]
-                                             - 반드시 **JSON 배열(list)**로 출력하세요.
-                                             - 첫 번째 JSON 객체는 If–Then 형식의 행동 서명입니다.
-                                             - 행동 서명 문장의 상황 부분은 **입력으로 받은 situation_name의 내용을 그대로 반영**해야 합니다. **입력된 모든 상위 유형과 그에 해당하는 하위 유형을 빠짐없이 정확히 포함**하여 작성하십시오.
-                                             - 두 번째 JSON 객체는 situation_weight 항목은 이번 프롬포트로 추출되는 [상황]에 대하여 산정하여 작성하시오
-                                             - 행동 서명 문장은 **상황들이 복합적으로 작용했을 때의 공통된 경향성**을 일반화하여 1~2문장으로 기술하세요.
-                                             - 출력물의 상황유형은 '상황유형': '하위유형', '하위유형'.... 의 형식으로 해당하는 하위 내용을 모두 출력하도록 하시오.
-
-                                             [출력 예시]
-                                             [
-                                              { "만약 인물이 상황을 'Deception: Lying, Manipulation / Duty: Responsibility'이라고 인식한다면,  
-                                                 그는 '상대의 의도를 경계하면서도 조직적 통제를 유지하려는 경향이 있다.'" },
-                                              { "상황 가중치 비율": {"Deception": 66, "Duty": 34}}
-                                             ]
-
-                                             [작성 가이드]
-                                             - situation_name은 **입력으로 받은 데이터를 그대로 인용하여 사용**하세요. (단일 또는 다중 카테고리 모두 가능)
-                                             - 행동 표현은 추상적 경향성을 담고 있어야 하며, 특정 인물·도구·보상 중심이어선 안 됩니다.
-                                             - 복수 상황의 상호작용을 반영한 ‘통합적 태도’나 ‘우선 반응 경향’을 중심으로 서술하세요.
-                                             - belief, emotion, goal 간의 인과적 흐름을 고려해 행동 서명 문장을 구성하세요.
-                                             """
-                                             )
-
-            # 9. 분석 실행 (본 코드와 거의 동일)
-            if 'caps_results' not in st.session_state or st.session_state.get('caps_character') != character_name:
-                results = []
-                for chunk in text_chunks:
-                    human_msg = HumanMessage(content=f"소설 내용:\n\"\"\"\n{chunk}\n\"\"\"")
-                    response = llm_metadata.invoke([system_caps_msg, human_msg])
-                    results.append(response.content)
-
-                parsed = []
-                for idx, r in enumerate(results):
-                    try:
-                        json_str = extract_json_from_codeblock(r)
-                        parsed += json.loads(json_str)
-                    except Exception as e:
-                        print(f"JSON 파싱 실패 at idx {idx}: {e}")
-                        print("------ RAW 응답 ------")
-                        print(r)
-                print(f"parsed 개수: {len(parsed)}")
-                print(parsed)
-
-                filtered_entries = [e for e in parsed if e["character"] == character_name]
-                grouped_by_situation = defaultdict(list)
-                caps_results = []
-                for entry in filtered_entries:
-                    for situation in entry.get("situation_type", []):
-                        grouped_by_situation[situation].append(entry)
-
-                for situation, entries in grouped_by_situation.items():
-                    entry = entries[0]  # 대표 샘플
-                    situation_name = entry["situation_name"]
-                    situation_weight = entry["situation_weight"]
-                    emotion = entry["emotion"]
-                    belief = entry["belief"]
-                    action = entry["action"]
-                    goal = entry["goal"]
-
-                    prompt = f"""다음은 '{character_name}'가 '{situation}' 상황에서 반복적으로 보이는 행동 양식입니다.
-                                - 상황 분류(situation_name): {situation_name}
-                                - 상황 가중치(situation_weight): {situation_weight}
-                                - 감정(emotion): {emotion}
-                                - 신념(belief): {belief}
-                                - 행동(action): {action}
-                                - 목표(goal): {goal}
-
-                                이 정보를 바탕으로 CAPS 이론 기반 If–Then 행동 서명을 생성하세요.
-                                """
-                    human_msg = HumanMessage(content=prompt.strip())
-                    try:
-                        response = llm_metadata.invoke([system_caps2_msg, human_msg])
-                        caps_results.append(response.content.strip())
-                    except Exception as e:
-                        st.warning(f"❌ LLM 오류 at situation '{situation}': {e}")
-
-                # 세션 상태에 분석 결과 캐싱!
-                st.session_state.caps_results = caps_results
-                st.session_state.caps_character = character_name
-
-                # 파일로 저장도 1회만!
-                with open(f'caps_results_{character_name}.txt', 'w', encoding='utf-8') as f:
-                    for sig in caps_results:
-                        f.write(str(sig) + '\n')
-
-                # Streamlit 결과 표시
-                if caps_results:
-                    for sig in caps_results:
-                        st.markdown(f"```\n{sig}\n```")
-                else:
-                    st.warning("행동서명 분석 결과가 없습니다.")
-
-            else:
-                # 이미 분석 결과가 있으면 재사용 (LLM 호출 없이 바로 출력)
-                for sig in st.session_state.caps_results:
-                    st.markdown(f"```\n{sig}\n```")
+        else:
+            # 이미 분석 결과가 있으면 재사용 (LLM 호출 없이 바로 출력)
+            for sig in st.session_state.caps_results:
+                st.markdown(f"```\n{sig}\n```")
         # CAPS 결과는 항상 표시
         if "caps_results" in st.session_state and st.session_state.caps_results:
             st.header(f"{character_name}의 소설 내 상황-행동 패턴 분석 (CAPS)")
